@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import smtplib
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Literal
 
@@ -15,6 +19,23 @@ from pydantic import BaseModel, Field, HttpUrl
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 FRONTEND_DIR = BASE_DIR / "frontend"
+DAILY_QUERY = "What is the most latest AI news in the past 24 hours?"
+DAILY_MAX_RESULTS = 5
+DAILY_REGION = "wt-wt"
+DAILY_SAFESEARCH = "moderate"
+DAILY_SUBJECT = "Daily AI Brief"
+
+SMTP_HOST = os.getenv("NEWS_SMTP_HOST")
+SMTP_PORT = int(os.getenv("NEWS_SMTP_PORT", "465"))
+SMTP_USERNAME = os.getenv("NEWS_SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("NEWS_SMTP_PASSWORD")
+NEWS_SENDER = os.getenv("NEWS_SENDER", SMTP_USERNAME or "no-reply@ai-first.dev")
+NEWS_RECIPIENT = os.getenv("NEWS_RECIPIENT", "rzhou213@gmail.com")
+AUTO_EMAIL_ENABLED = os.getenv("NEWS_AUTOMATE_EMAIL", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 app = FastAPI()
 
@@ -56,6 +77,10 @@ class ChatRequest(BaseModel):
     safesearch: Literal["off", "moderate", "strict"] = Field(
         default="moderate", description="DuckDuckGo safesearch setting."
     )
+    response_format: Literal["default", "newsletter"] = Field(
+        default="default",
+        description="Optional response format hint. Use 'newsletter' for mail-ready summaries.",
+    )
 
 
 DUCKDUCKGO_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
@@ -88,6 +113,8 @@ class ChatResponse(BaseModel):
     tool: str | None = None
     results: list[SearchResult] | None = None
     url_content: UrlContent | None = None
+    newsletter_text: str | None = None
+    newsletter_html: str | None = None
 
 
 def duckduckgo_search_tool(
@@ -209,6 +236,137 @@ def fetch_url_tool(url: str, *, timeout: float = 10.0) -> UrlContent:
     )
 
 
+def build_newsletter(
+    results: list[SearchResult], query: str
+) -> tuple[str | None, str | None]:
+    """
+    Create plain-text and HTML newsletter snippets from search results.
+    """
+
+    if not results:
+        return None, None
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    heading = f"AI Brief – {timestamp}"
+    intro = f"Question: {query}"
+
+    text_lines = [heading, intro, ""]
+    html_lines = [
+        "<section style='font-family:Inter,Arial,sans-serif;max-width:640px;margin:0 auto;'>",
+        f"<h2 style='color:#0f172a;'>{heading}</h2>",
+        f"<p style='color:#334155;'>{intro}</p>",
+        "<ol style='padding-left:20px;'>",
+    ]
+
+    for idx, item in enumerate(results, start=1):
+        title = item.title or "Untitled story"
+        href = item.href or ""
+        snippet = item.body or ""
+
+        text_lines.append(f"{idx}. {title}")
+        if href:
+            text_lines.append(f"   {href}")
+        if snippet:
+            text_lines.append(f"   {snippet}")
+        text_lines.append("")
+
+        html_lines.append("<li style='margin-bottom:18px;'>")
+        if href:
+            html_lines.append(
+                f"<strong><a href='{href}' style='color:#2563eb;text-decoration:none;'>{title}</a></strong>"
+            )
+        else:
+            html_lines.append(f"<strong>{title}</strong>")
+        if snippet:
+            html_lines.append(f"<p style='margin:6px 0;color:#475569;'>{snippet}</p>")
+        html_lines.append("</li>")
+
+    html_lines.append("</ol>")
+    html_lines.append(
+        "<p style='color:#94a3b8;font-size:13px;'>Generated automatically by AI-first Dev Chat.</p>"
+    )
+    html_lines.append("</section>")
+
+    text_lines.append("Generated automatically by AI-first Dev Chat.")
+
+    return "\n".join(text_lines).strip(), "\n".join(html_lines)
+
+
+def create_daily_payload() -> ChatRequest:
+    return ChatRequest(
+        message=DAILY_QUERY,
+        tool="duckduckgo_search",
+        max_results=DAILY_MAX_RESULTS,
+        region=DAILY_REGION,
+        safesearch=DAILY_SAFESEARCH,
+        response_format="newsletter",
+    )
+
+
+def send_email_message(
+    subject: str,
+    text_body: str,
+    html_body: str | None,
+    recipient: str = NEWS_RECIPIENT,
+) -> None:
+    if not (SMTP_HOST and SMTP_USERNAME and SMTP_PASSWORD):
+        raise RuntimeError(
+            "Missing SMTP configuration. Set NEWS_SMTP_HOST/PORT/USERNAME/PASSWORD."
+        )
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = NEWS_SENDER
+    msg["To"] = recipient
+    msg.set_content(text_body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+
+    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as smtp:
+        smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+        smtp.send_message(msg)
+
+
+async def send_daily_email() -> None:
+    payload = create_daily_payload()
+    response, history = await asyncio.to_thread(run_agent, payload)
+    print(json.dumps(history, default=str))
+
+    if not response.newsletter_text:
+        print("Daily newsletter: no content to email.")
+        return
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    subject = f"{DAILY_SUBJECT} – {timestamp}"
+
+    await asyncio.to_thread(
+        send_email_message,
+        subject,
+        response.newsletter_text,
+        response.newsletter_html,
+        NEWS_RECIPIENT,
+    )
+    print(f"Daily newsletter sent to {NEWS_RECIPIENT}")
+
+
+def seconds_until_target(hour: int = 6, minute: int = 0) -> float:
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def daily_email_scheduler() -> None:
+    while True:
+        wait_seconds = seconds_until_target()
+        await asyncio.sleep(wait_seconds)
+        try:
+            await send_daily_email()
+        except Exception as exc:  # pragma: no cover - background safety
+            print(f"Daily email failed: {exc}")
+
+
 def run_agent(payload: ChatRequest) -> tuple[ChatResponse, dict]:
     """
     Shared orchestration logic for both standard and streaming endpoints.
@@ -286,6 +444,17 @@ def run_agent(payload: ChatRequest) -> tuple[ChatResponse, dict]:
             used_tool=False,
         )
 
+    if (
+        payload.response_format == "newsletter"
+        and response.results
+        and not response.newsletter_text
+    ):
+        text_newsletter, html_newsletter = build_newsletter(
+            response.results, payload.message
+        )
+        response.newsletter_text = text_newsletter
+        response.newsletter_html = html_newsletter
+
     history["final_response"] = response.model_dump()
     return response, history
 
@@ -358,4 +527,22 @@ async def serve_frontend() -> HTMLResponse:
     if not index_file.exists():
         raise HTTPException(status_code=404, detail="Frontend not found.")
     return HTMLResponse(index_file.read_text(encoding="utf-8"))
+
+
+@app.get("/newsletter/daily", response_model=ChatResponse)
+async def daily_newsletter() -> ChatResponse:
+    """
+    Convenience endpoint that always returns the default daily AI newsletter.
+    """
+
+    payload = create_daily_payload()
+    response, history = run_agent(payload)
+    print(json.dumps(history, default=str))
+    return response
+
+
+@app.on_event("startup")
+async def configure_scheduler() -> None:
+    if AUTO_EMAIL_ENABLED:
+        asyncio.create_task(daily_email_scheduler())
 

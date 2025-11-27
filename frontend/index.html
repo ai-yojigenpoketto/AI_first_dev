@@ -30,6 +30,23 @@
             </aside>
 
             <main class="chat-panel">
+                <section class="subscription" aria-live="polite">
+                    <div class="subscription-header">
+                        <div>
+                            <h3>Daily AI Newsletter</h3>
+                            <p>Fetch the preset question “What is the most latest AI news in the past 24 hours?” or
+                                automate it via the endpoint below.</p>
+                        </div>
+                        <button id="dailyNewsletterBtn" type="button" class="primary-btn tone-secondary">
+                            Get Daily Brief
+                        </button>
+                    </div>
+                    <div class="automation">
+                        <code id="automationCommand"></code>
+                        <button id="copyAutomation" type="button" class="ghost-btn">Copy Command</button>
+                    </div>
+                </section>
+
                 <div id="messages" class="messages" aria-live="polite"></div>
                 <div id="thinking" class="thinking hidden" aria-live="assertive" aria-busy="true">
                     <span class="dot"></span>
@@ -72,6 +89,14 @@
                                 <option value="strict">strict</option>
                             </select>
                         </label>
+
+                        <label>
+                            <span>Response Format</span>
+                            <select id="formatSelect">
+                                <option value="default" selected>Standard</option>
+                                <option value="newsletter">Newsletter</option>
+                            </select>
+                        </label>
                     </div>
 
                     <label id="urlField" class="full-width hidden">
@@ -81,6 +106,15 @@
 
                     <button type="submit" class="primary-btn">Send</button>
                 </form>
+
+                <section id="newsletterSection" class="newsletter hidden" aria-live="polite">
+                    <div class="newsletter-header">
+                        <h3>Newsletter Preview</h3>
+                        <button id="copyNewsletter" type="button" class="ghost-btn">Copy Text</button>
+                    </div>
+                    <div id="newsletterHtml" class="newsletter-html"></div>
+                    <textarea id="newsletterText" readonly></textarea>
+                </section>
             </main>
         </div>
     </div>
