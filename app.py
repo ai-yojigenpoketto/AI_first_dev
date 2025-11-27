@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from pathlib import Path
 from typing import Literal
 
 import httpx
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, HttpUrl
 
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+FRONTEND_DIR = BASE_DIR / "frontend"
+
 app = FastAPI()
+
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/hello/{user_input}")
@@ -198,10 +209,9 @@ def fetch_url_tool(url: str, *, timeout: float = 10.0) -> UrlContent:
     )
 
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_agent(payload: ChatRequest) -> ChatResponse:
+def run_agent(payload: ChatRequest) -> tuple[ChatResponse, dict]:
     """
-    Minimal chat endpoint whose agent can call web-enabled tools on demand.
+    Shared orchestration logic for both standard and streaming endpoints.
     """
 
     history: dict = {
@@ -210,6 +220,8 @@ async def chat_agent(payload: ChatRequest) -> ChatResponse:
         "tool_results": [],
         "final_response": None,
     }
+
+    response: ChatResponse
 
     if payload.tool == "duckduckgo_search":
         tool_call = {
@@ -242,11 +254,7 @@ async def chat_agent(payload: ChatRequest) -> ChatResponse:
             tool="duckduckgo_search",
             results=results or None,
         )
-        history["final_response"] = response.model_dump()
-        print(json.dumps(history, default=str))
-        return response
-
-    if payload.tool == "fetch_url":
+    elif payload.tool == "fetch_url":
         if not payload.url:
             raise HTTPException(
                 status_code=422,
@@ -269,18 +277,85 @@ async def chat_agent(payload: ChatRequest) -> ChatResponse:
             tool="fetch_url",
             url_content=url_content,
         )
-        history["final_response"] = response.model_dump()
-        print(json.dumps(history, default=str))
-        return response
+    else:
+        response = ChatResponse(
+            reply=(
+                "No tool requested. Provide tool='duckduckgo_search' for web search or "
+                "tool='fetch_url' with a 'url' to pull page content."
+            ),
+            used_tool=False,
+        )
 
-    response = ChatResponse(
-        reply=(
-            "No tool requested. Provide tool='duckduckgo_search' for web search or "
-            "tool='fetch_url' with a 'url' to pull page content."
-        ),
-        used_tool=False,
-    )
     history["final_response"] = response.model_dump()
+    return response, history
+
+
+def chunk_reply(text: str, words_per_chunk: int = 6) -> list[str]:
+    """
+    Split a reply string into small, word-friendly chunks for streaming purposes.
+    """
+
+    if not text:
+        return [""]
+
+    words = text.split()
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for word in words:
+        current.append(word)
+        if len(current) >= words_per_chunk:
+            chunks.append(" ".join(current))
+            current = []
+
+    if current:
+        chunks.append(" ".join(current))
+
+    return chunks
+
+
+def format_sse(data: dict) -> str:
+    return f"data: {json.dumps(data)}\n\n"
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat_agent(payload: ChatRequest) -> ChatResponse:
+    """
+    Minimal chat endpoint whose agent can call web-enabled tools on demand.
+    """
+
+    response, history = run_agent(payload)
     print(json.dumps(history, default=str))
     return response
+
+
+@app.post("/chat/stream")
+async def chat_agent_stream(payload: ChatRequest) -> StreamingResponse:
+    """
+    Streaming variant of the chat endpoint using Server-Sent Events.
+    """
+
+    response, history = run_agent(payload)
+
+    async def event_generator():
+        for chunk in chunk_reply(response.reply):
+            yield format_sse({"type": "token", "value": chunk})
+            await asyncio.sleep(0)
+        yield format_sse({"type": "message", "value": response.model_dump()})
+
+    stream = StreamingResponse(event_generator(), media_type="text/event-stream")
+    print(json.dumps(history, default=str))
+    return stream
+
+
+@app.get("/", response_class=HTMLResponse)
+async def serve_frontend() -> HTMLResponse:
+    """
+    Serve the single-page chat application.
+    """
+
+    index_file = FRONTEND_DIR / "index.html"
+    if not index_file.exists():
+        raise HTTPException(status_code=404, detail="Frontend not found.")
+    return HTMLResponse(index_file.read_text(encoding="utf-8"))
 

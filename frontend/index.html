@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI-first Dev Chat</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script defer src="/static/app.js"></script>
+</head>
+
+<body>
+    <div class="app-shell">
+        <header class="app-header">
+            <div>
+                <h1>AI-first Dev Chat</h1>
+                <p class="app-subtitle">Powered by <a id="openapiLink" href="/openapi.json" target="_blank"
+                        rel="noreferrer">OpenAPI backend</a></p>
+            </div>
+            <div class="backend-meta">
+                <span>Base URL:</span>
+                <code id="baseUrl"></code>
+            </div>
+        </header>
+
+        <div class="app-body">
+            <aside class="history-panel">
+                <h2>Chat History</h2>
+                <ul id="historyList" aria-live="polite"></ul>
+            </aside>
+
+            <main class="chat-panel">
+                <div id="messages" class="messages" aria-live="polite"></div>
+                <div id="thinking" class="thinking hidden" aria-live="assertive" aria-busy="true">
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span>Thinking...</span>
+                </div>
+
+                <form id="chatForm" class="chat-form">
+                    <label class="full-width">
+                        <span>Message</span>
+                        <textarea id="userMessage" rows="3" placeholder="Ask anything..." required></textarea>
+                    </label>
+
+                    <div class="form-grid">
+                        <label>
+                            <span>Tool</span>
+                            <select id="toolSelect">
+                                <option value="">No Tool</option>
+                                <option value="duckduckgo_search">duckduckgo_search</option>
+                                <option value="fetch_url">fetch_url</option>
+                            </select>
+                        </label>
+
+                        <label>
+                            <span>Max results (search)</span>
+                            <input type="number" id="maxResults" min="1" max="10" value="3" />
+                        </label>
+
+                        <label>
+                            <span>Region</span>
+                            <input type="text" id="regionInput" value="wt-wt" />
+                        </label>
+
+                        <label>
+                            <span>Safesearch</span>
+                            <select id="safesearchSelect">
+                                <option value="moderate" selected>moderate</option>
+                                <option value="off">off</option>
+                                <option value="strict">strict</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <label id="urlField" class="full-width hidden">
+                        <span>Target URL (for fetch_url tool)</span>
+                        <input type="url" id="urlInput" placeholder="https://example.com/story" />
+                    </label>
+
+                    <button type="submit" class="primary-btn">Send</button>
+                </form>
+            </main>
+        </div>
+    </div>
+</body>
+
+</html>
+
