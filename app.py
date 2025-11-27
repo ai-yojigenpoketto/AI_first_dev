@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
 
 import httpx
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, HttpUrl
 
@@ -47,6 +47,14 @@ class ChatRequest(BaseModel):
     )
 
 
+DUCKDUCKGO_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
+SAFESEARCH_MAP = {
+    "off": "-2",
+    "moderate": "-1",
+    "strict": "1",
+}
+
+
 class SearchResult(BaseModel):
     title: str
     href: str
@@ -72,32 +80,61 @@ class ChatResponse(BaseModel):
 
 
 def duckduckgo_search_tool(
-    query: str, *, max_results: int, region: str, safesearch: str
-) -> list[SearchResult]:
+    query: str, *, max_results: int, region: str, safesearch: str, timeout: float = 10
+) -> tuple[list[SearchResult], list[dict]]:
     """
-    Execute a DuckDuckGo search with basic result sanitisation.
+    Execute a DuckDuckGo search via the HTML endpoint and sanitise the results.
     """
+
+    payload = {
+        "q": query,
+        "kl": region,
+        "kp": SAFESEARCH_MAP.get(safesearch, SAFESEARCH_MAP["moderate"]),
+    }
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        )
+    }
+
     try:
-        with DDGS(timeout=10) as ddgs:
-            raw_results = ddgs.text(
-                keywords=query,
-                max_results=max_results,
-                region=region,
-                safesearch=safesearch,
-            )
-            return [
-                SearchResult(
-                    title=item.get("title", ""),
-                    href=item.get("href", ""),
-                    body=item.get("body", ""),
-                )
-                for item in raw_results
-            ]
-    except Exception as exc:  # pragma: no cover - runtime safeguard
+        with httpx.Client(timeout=timeout, headers=headers) as client:
+            response = client.post(DUCKDUCKGO_HTML_ENDPOINT, data=payload)
+            response.raise_for_status()
+    except httpx.HTTPError as exc:  # pragma: no cover - runtime safeguard
         raise HTTPException(
-            status_code=502,
-            detail=f"DuckDuckGo search failed: {exc}",
+            status_code=502, detail=f"DuckDuckGo search failed: {exc}"
         ) from exc
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    structured: list[dict] = []
+
+    for result in soup.select("div.result"):
+        title_tag = result.select_one("a.result__a")
+        if not title_tag:
+            continue
+        link = title_tag.get("href") or ""
+        snippet_tag = result.select_one("a.result__snippet, div.result__snippet")
+        snippet_text = snippet_tag.get_text(strip=True) if snippet_tag else ""
+        structured.append(
+            {
+                "title": title_tag.get_text(strip=True),
+                "href": link,
+                "body": snippet_text,
+            }
+        )
+        if len(structured) >= max_results:
+            break
+
+    search_results = [
+        SearchResult(title=item["title"], href=item["href"], body=item["body"])
+        for item in structured
+    ]
+
+    return search_results, structured
 
 
 def fetch_url_tool(url: str, *, timeout: float = 10.0) -> UrlContent:
@@ -167,24 +204,47 @@ async def chat_agent(payload: ChatRequest) -> ChatResponse:
     Minimal chat endpoint whose agent can call web-enabled tools on demand.
     """
 
+    history: dict = {
+        "user_message": payload.message,
+        "tool_calls": [],
+        "tool_results": [],
+        "final_response": None,
+    }
+
     if payload.tool == "duckduckgo_search":
-        results = duckduckgo_search_tool(
+        tool_call = {
+            "tool": "duckduckgo_search",
+            "parameters": {
+                "keywords": payload.message,
+                "max_results": payload.max_results,
+                "region": payload.region,
+                "safesearch": payload.safesearch,
+            },
+        }
+        history["tool_calls"].append(tool_call)
+        results, raw_results = duckduckgo_search_tool(
             payload.message,
             max_results=payload.max_results,
             region=payload.region,
             safesearch=payload.safesearch,
+        )
+        history["tool_results"].append(
+            {"tool": "duckduckgo_search", "data": raw_results}
         )
         reply_prefix = (
             f"duckduckgo_search found {len(results)} result(s)"
             if results
             else "duckduckgo_search returned no results"
         )
-        return ChatResponse(
+        response = ChatResponse(
             reply=f"{reply_prefix} for query: {payload.message}",
             used_tool=True,
             tool="duckduckgo_search",
             results=results or None,
         )
+        history["final_response"] = response.model_dump()
+        print(json.dumps(history, default=str))
+        return response
 
     if payload.tool == "fetch_url":
         if not payload.url:
@@ -192,19 +252,35 @@ async def chat_agent(payload: ChatRequest) -> ChatResponse:
                 status_code=422,
                 detail="Field 'url' is required when using tool='fetch_url'.",
             )
+        tool_call = {
+            "tool": "fetch_url",
+            "parameters": {
+                "url": str(payload.url),
+            },
+        }
+        history["tool_calls"].append(tool_call)
         url_content = fetch_url_tool(str(payload.url))
-        return ChatResponse(
+        history["tool_results"].append(
+            {"tool": "fetch_url", "data": url_content.model_dump()}
+        )
+        response = ChatResponse(
             reply=f"Fetched and parsed {url_content.url}",
             used_tool=True,
             tool="fetch_url",
             url_content=url_content,
         )
+        history["final_response"] = response.model_dump()
+        print(json.dumps(history, default=str))
+        return response
 
-    return ChatResponse(
+    response = ChatResponse(
         reply=(
             "No tool requested. Provide tool='duckduckgo_search' for web search or "
             "tool='fetch_url' with a 'url' to pull page content."
         ),
         used_tool=False,
     )
+    history["final_response"] = response.model_dump()
+    print(json.dumps(history, default=str))
+    return response
 
